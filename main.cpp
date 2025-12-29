@@ -2,7 +2,7 @@
   CHIP-8 Emulator
   Ricardo Abuabara - 2023
   Based on Austin Morlan's guide: https://austinmorlan.com/posts/chip8_emulator/
-  Built with C++17 + SDL2
+  Built with C++17 + SDL2 for graphics and input
 */
 
 #include <cstdint>
@@ -13,12 +13,14 @@
 #include <iostream>
 #include <SDL.h>
 
-const unsigned int START_ADDRESS = 0x200;
+const unsigned int START_ADDRESS = 0x200;          // ROMs are loaded starting at memory address 0x200
 const unsigned int FONTSET_SIZE = 80;
-const unsigned int FONTSET_START_ADDRESS = 0x50;
+const unsigned int FONTSET_START_ADDRESS = 0x50;   // Built-in hex font sprites are loaded here
 const unsigned int VIDEO_WIDTH = 64;
 const unsigned int VIDEO_HEIGHT = 32;
+const unsigned int SCALE = 10;                     // Pixel scaling for window size
 
+// Built-in font sprites for hexadecimal digits 0-F
 uint8_t fontset[FONTSET_SIZE] = {
   0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
   0x20, 0x60, 0x20, 0x20, 0x70, // 1
@@ -40,25 +42,179 @@ uint8_t fontset[FONTSET_SIZE] = {
 
 class Chip8 {
 public:
-  uint8_t registers[16]{};
-  uint8_t memory[4096]{};
-  uint16_t index{};
-  uint16_t pc{};
-  uint16_t stack[16]{};
-  uint8_t sp{};
+  uint8_t registers[16]{};      // V0 to VF general-purpose registers
+  uint8_t memory[4096]{};       // 4KB total RAM
+  uint16_t index{};             // Index register 'I'
+  uint16_t pc{};                // Program counter
+  uint16_t stack[16]{};         // Call stack for subroutines
+  uint8_t sp{};                 // Stack pointer
   uint8_t delayTimer{};
   uint8_t soundTimer{};
-  uint8_t keypad[16]{};
-  uint32_t video[64 * 32]{};
-  uint16_t opcode{};
+  uint8_t keypad[16]{};         // Current state of hex keypad (0-F)
+  uint32_t video[VIDEO_WIDTH * VIDEO_HEIGHT]{}; // Monochrome display buffer (white = 0xFFFFFFFF, black = 0)
+  uint16_t opcode{};            // Current opcode being executed
 
-  Chip8() {
-    pc = START_ADDRESS;
-    for (int i = 0; i < FONTSET_SIZE; ++i)
+  std::default_random_engine randGen;
+  std::uniform_int_distribution<uint8_t> randByte;
+
+  // Function pointer tables for fast opcode dispatching
+  typedef void (Chip8::*Chip8Func)();
+  Chip8Func table[0xF + 1]{};
+  Chip8Func table0[0xE + 1]{};
+  Chip8Func table8[0xE + 1]{};
+  Chip8Func tableE[0xE + 1]{};
+  Chip8Func tableF[0x65 + 1]{};
+
+  Chip8() : randGen(std::chrono::system_clock::now().time_since_epoch().count()), randByte(0, 255U) {
+    pc = START_ADDRESS;  // Program execution starts at 0x200
+
+    // Load built-in font sprites into memory
+    for (unsigned int i = 0; i < FONTSET_SIZE; ++i) {
       memory[FONTSET_START_ADDRESS + i] = fontset[i];
+    }
+
+    // Set up main opcode table
+    table[0x0] = &Chip8::Table0;
+    table[0x1] = &Chip8::OP_1nnn;
+    table[0x2] = &Chip8::OP_2nnn;
+    table[0x3] = &Chip8::OP_3xkk;
+    table[0x4] = &Chip8::OP_4xkk;
+    table[0x5] = &Chip8::OP_5xy0;
+    table[0x6] = &Chip8::OP_6xkk;
+    table[0x7] = &Chip8::OP_7xkk;
+    table[0x8] = &Chip8::Table8;
+    table[0x9] = &Chip8::OP_9xy0;
+    table[0xA] = &Chip8::OP_Annn;
+    table[0xB] = &Chip8::OP_Bnnn;
+    table[0xC] = &Chip8::OP_Cxkk;
+    table[0xD] = &Chip8::OP_Dxyn;
+    table[0xE] = &Chip8::TableE;
+    table[0xF] = &Chip8::TableF;
+
+    // Initialize sub-tables with NULL (unused opcodes)
+    for (size_t i = 0; i <= 0xE; i++) {
+      table0[i] = &Chip8::OP_NULL;
+      table8[i] = &Chip8::OP_NULL;
+      tableE[i] = &Chip8::OP_NULL;
+    }
+    for (size_t i = 0; i <= 0x65; i++) tableF[i] = &Chip8::OP_NULL;
+
+    // Fill in actual opcodes
+    table0[0x0] = &Chip8::OP_00E0;
+    table0[0xE] = &Chip8::OP_00EE;
+
+    table8[0x0] = &Chip8::OP_8xy0;
+    table8[0x1] = &Chip8::OP_8xy1;
+    table8[0x2] = &Chip8::OP_8xy2;
+    table8[0x3] = &Chip8::OP_8xy3;
+    table8[0x4] = &Chip8::OP_8xy4;
+    table8[0x5] = &Chip8::OP_8xy5;
+    table8[0x6] = &Chip8::OP_8xy6;
+    table8[0x7] = &Chip8::OP_8xy7;
+    table8[0xE] = &Chip8::OP_8xyE;
+
+    tableE[0x1] = &Chip8::OP_ExA1;
+    tableE[0xE] = &Chip8::OP_Ex9E;
+
+    tableF[0x07] = &Chip8::OP_Fx07;
+    tableF[0x0A] = &Chip8::OP_Fx0A;
+    tableF[0x15] = &Chip8::OP_Fx15;
+    tableF[0x18] = &Chip8::OP_Fx18;
+    tableF[0x1E] = &Chip8::OP_Fx1E;
+    tableF[0x29] = &Chip8::OP_Fx29;
+    tableF[0x33] = &Chip8::OP_Fx33;
+    tableF[0x55] = &Chip8::OP_Fx55;
+    tableF[0x65] = &Chip8::OP_Fx65;
   }
 
+  void OP_NULL() {} // Placeholder for unused opcodes
+
+  void Table0() { (this->*table0[opcode & 0x000Fu])(); }
+  void Table8() { (this->*table8[opcode & 0x000Fu])(); }
+  void TableE() { (this->*tableE[opcode & 0x000Fu])(); }
+  void TableF() { (this->*tableF[opcode & 0x00FFu])(); }
+
+  void OP_00E0() { memset(video, 0, sizeof(video)); } // Clear the display
+  void OP_00EE() { --sp; pc = stack[sp]; } // Return from subroutine
+
+  void OP_1nnn() { pc = opcode & 0x0FFFu; } // Jump to address NNN
+  void OP_2nnn() { stack[sp++] = pc; pc = opcode & 0x0FFFu; } // Call subroutine at NNN
+  void OP_3xkk() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t byte = opcode & 0x00FFu; if (registers[Vx] == byte) pc += 2; } // Skip next instruction if Vx == KK
+  void OP_4xkk() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t byte = opcode & 0x00FFu; if (registers[Vx] != byte) pc += 2; }
+  void OP_5xy0() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; if (registers[Vx] == registers[Vy]) pc += 2; }
+  void OP_6xkk() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; registers[Vx] = opcode & 0x00FFu; } // Set Vx = KK
+  void OP_7xkk() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; registers[Vx] += opcode & 0x00FFu; } // Add KK to Vx
+
+  void OP_8xy0() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; registers[Vx] = registers[Vy]; }
+  void OP_8xy1() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; registers[Vx] |= registers[Vy]; }
+  void OP_8xy2() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; registers[Vx] &= registers[Vy]; }
+  void OP_8xy3() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; registers[Vx] ^= registers[Vy]; }
+  void OP_8xy4() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; uint16_t sum = registers[Vx] + registers[Vy]; registers[0xF] = sum > 255 ? 1 : 0; registers[Vx] = sum & 0xFF; }
+  void OP_8xy5() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; registers[0xF] = registers[Vx] >= registers[Vy] ? 1 : 0; registers[Vx] -= registers[Vy]; }
+  void OP_8xy6() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; registers[0xF] = registers[Vx] & 0x1; registers[Vx] >>= 1; }
+  void OP_8xy7() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; registers[0xF] = registers[Vy] >= registers[Vx] ? 1 : 0; registers[Vx] = registers[Vy] - registers[Vx]; }
+  void OP_8xyE() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; registers[0xF] = (registers[Vx] & 0x80) >> 7; registers[Vx] <<= 1; }
+
+  void OP_9xy0() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t Vy = (opcode & 0x00F0u) >> 4u; if (registers[Vx] != registers[Vy]) pc += 2; }
+  void OP_Annn() { index = opcode & 0x0FFFu; } // Set index register to NNN
+  void OP_Bnnn() { pc = (opcode & 0x0FFFu) + registers[0]; } // Jump to NNN + V0
+  void OP_Cxkk() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; registers[Vx] = randByte(randGen) & (opcode & 0x00FFu); } // Random number
+
+  void OP_Dxyn() { // Draw sprite — the most important and complex opcode
+    uint8_t Vx = (opcode & 0x0F00u) >> 8u;
+    uint8_t Vy = (opcode & 0x00F0u) >> 4u;
+    uint8_t height = opcode & 0x000Fu;
+
+    registers[0xF] = 0; // Clear collision flag
+    for (unsigned int row = 0; row < height; ++row) {
+      uint8_t spriteByte = memory[index + row];
+      for (unsigned int col = 0; col < 8; ++col) {
+        uint8_t spritePixel = spriteByte & (0x80u >> col);
+        uint32_t* screenPixel = &video[(Vy + row) * VIDEO_WIDTH + (Vx + col)];
+
+        if (spritePixel) {
+          if (*screenPixel == 0xFFFFFFFF) {
+            registers[0xF] = 1; // Set collision flag
+          }
+          *screenPixel ^= 0xFFFFFFFF; // XOR toggle pixel
+        }
+      }
+    }
+  }
+
+  void OP_Ex9E() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t key = registers[Vx]; if (keypad[key]) pc += 2; }
+  void OP_ExA1() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t key = registers[Vx]; if (!keypad[key]) pc += 2; }
+
+  void OP_Fx07() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; registers[Vx] = delayTimer; }
+  void OP_Fx0A() { // Wait for key press — halts until a key is pressed
+    bool keyPressed = false;
+    for (int i = 0; i < 16; ++i) {
+      if (keypad[i]) {
+        registers[(opcode & 0x0F00u) >> 8u] = i;
+        keyPressed = true;
+        break;
+      }
+    }
+    if (!keyPressed) pc -= 2; // Repeat until key is pressed
+  }
+  void OP_Fx15() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; delayTimer = registers[Vx]; }
+  void OP_Fx18() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; soundTimer = registers[Vx]; }
+  void OP_Fx1E() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; index += registers[Vx]; }
+  void OP_Fx29() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; uint8_t digit = registers[Vx]; index = FONTSET_START_ADDRESS + (5 * digit); }
+  void OP_Fx33() { // Store BCD representation of Vx in memory at index
+    uint8_t Vx = (opcode & 0x0F00u) >> 8u;
+    uint8_t value = registers[Vx];
+    memory[index + 2] = value % 10;
+    value /= 10;
+    memory[index + 1] = value % 10;
+    value /= 10;
+    memory[index] = value;
+  }
+  void OP_Fx55() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; for (uint8_t i = 0; i <= Vx; ++i) memory[index + i] = registers[i]; }
+  void OP_Fx65() { uint8_t Vx = (opcode & 0x0F00u) >> 8u; for (uint8_t i = 0; i <= Vx; ++i) registers[i] = memory[index + i]; }
+
   void LoadROM(const char* filename) {
+    // Load ROM file into memory starting at 0x200
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (file.is_open()) {
       std::streampos size = file.tellg();
@@ -66,14 +222,27 @@ public:
       file.seekg(0, std::ios::beg);
       file.read(buffer, size);
       file.close();
-      for (long i = 0; i < size; ++i)
+      for (long i = 0; i < size; ++i) {
         memory[START_ADDRESS + i] = buffer[i];
+      }
       delete[] buffer;
+    } else {
+      std::cerr << "Unable to open ROM file: " << filename << std::endl;
     }
   }
 
-  // (Full opcode implementation from Austin Morlan's guide is abbreviated here for brevity – the full code is in the previous message, but this version is shortened to fit. Use the full one from earlier if needed.)
-  // In practice, paste the full main.cpp from my previous long message.
+  void Cycle() {
+    // Fetch opcode (2 bytes)
+    opcode = (memory[pc] << 8) | memory[pc + 1];
+    pc += 2;
+
+    // Decode and execute via function pointer table
+    (this->*table[(opcode & 0xF000u) >> 12u])();
+
+    // Decrement timers at 60Hz rate (handled in main loop)
+    if (delayTimer > 0) --delayTimer;
+    if (soundTimer > 0) --soundTimer;
+  }
 };
 
 int main(int argc, char** argv) {
@@ -85,27 +254,50 @@ int main(int argc, char** argv) {
   Chip8 chip8;
   chip8.LoadROM(argv[1]);
 
-  SDL_Init(SDL_INIT_VIDEO);
-  SDL_Window* window = SDL_CreateWindow("CHIP-8 Emulator", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, VIDEO_WIDTH * 10, VIDEO_HEIGHT * 10, 0);
-  SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, 0);
-  SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, VIDEO_WIDTH, VIDEO_HEIGHT);
+  // Initialize SDL for window and rendering
+  if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    std::cerr << "SDL could not initialize! SDL_Error: " << SDL_GetError() << std::endl;
+    return -1;
+  }
 
-  // Main loop (simplified)
+  SDL_Window* window = SDL_CreateWindow("CHIP-8 Emulator - Ricardo Abuabara",
+                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                        VIDEO_WIDTH * SCALE, VIDEO_HEIGHT * SCALE, 0);
+  SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+  SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                          SDL_TEXTUREACCESS_STREAMING, VIDEO_WIDTH, VIDEO_HEIGHT);
+
   bool quit = false;
+  auto lastCycleTime = std::chrono::high_resolution_clock::now();
+
   while (!quit) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       if (event.type == SDL_QUIT) quit = true;
+      // Add key handling here if desired (map SDL keys to keypad[0-15])
     }
 
-    // Cycle, update video, render...
+    // Run at ~500 Hz (CHIP-8 speed)
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    float dt = std::chrono::duration<float, std::milli>(currentTime - lastCycleTime).count();
+
+    if (dt > 2.0f) { // ~500 cycles per second
+      lastCycleTime = currentTime;
+      chip8.Cycle();
+    }
+
+    // Render if display changed (in full version, check a draw flag)
+    SDL_UpdateTexture(texture, NULL, chip8.video, VIDEO_WIDTH * sizeof(uint32_t));
     SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
     SDL_RenderPresent(renderer);
   }
 
+  // Cleanup
   SDL_DestroyTexture(texture);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   SDL_Quit();
+
   return 0;
 }
