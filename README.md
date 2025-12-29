@@ -22,19 +22,23 @@ Based on Austin Morlan's excellent guide: https://austinmorlan.com/posts/chip8_e
 - SDL2 library
 
 **Mac (Homebrew):**
-```bash
-brew install sdl2
-Ubuntu/Linux:
-Bashsudo apt-get install libsdl2-dev
-Windows: Use MSYS2, vcpkg, or Visual Studio with SDL2 installed.
+```bash```
+
+## Ubuntu/Linux
+```sudo apt-get install libsdl2-dev```
+
+## Windows
+Use MSYS2, vcpkg, or Visual Studio with SDL2 installed.
 Compile
-Bashg++ main.cpp -o chip8 -lSDL2
+```g++ main.cpp -o chip8 -lSDL2```
 Run
-Bash./chip8 path/to/your_rom.ch8
-Test ROMs & Games
+```./chip8 path/to/your_rom.ch8```
+
+## Test ROMs & Games
 You can find free CHIP-8 ROMs and test suites here:
 
 Opcode test suite: https://github.com/Timendus/chip8-test-suite
-Classic games (Pong, Space Invaders, Tetris, etc.): Search "CHIP-8 ROM pack"
+Classic games: IBM Logo, Pong, Space Invaders, Tetris, etc. (search "CHIP-8 ROM pack")
 
 Enjoy running retro games on your own emulator!
+
